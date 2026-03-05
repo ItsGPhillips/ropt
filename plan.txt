@@ -1,0 +1,543 @@
+# ropt: Interactive CLI Option Configuration Tool
+
+## Overview
+
+ropt is a stateful CLI tool that lets users define command-line arguments and options in a structured way.
+It presents the user with interactive prompts, parses responses, and stores results for retrieval.
+
+The tool operates as an explicit state machine: each CLI invocation mutates a session state file.
+Sessions are created with `ropt begin` and cleaned up with `ropt end`.
+
+## Core Concept
+
+Instead of writing complex argument parsing logic, define your CLI structure declaratively and let ropt handle the interaction.
+
+### Simple Example: Yes/No Choice
+
+```bash
+export ROPT_SESSION=$(ropt begin)
+ropt push choice --message "Would you like to continue?" --options "Yes" "No"
+ropt execute
+answer=$(ropt read --key "choice.0")
+ropt end
+# Output: answer="Yes" or answer="No"
+```
+
+### Complex Example: Replacing getopts/optarg
+
+```bash
+export ROPT_SESSION=$(ropt begin)
+
+ropt push command --name "build" --description "Build the project"
+  ropt push argument --name "target" --type choice
+    ropt append choice --value "debug" --description "Debug build"
+    ropt append choice --value "release" --description "Release build"
+  ropt pop
+  
+  ropt append flag --name "verbose" --short v --description "Verbose output"
+  ropt append input --name "output-dir" --type string --default "./dist"
+ropt pop
+
+ropt execute
+target=$(ropt read --key "build.target")
+verbose=$(ropt read --key "build.verbose")
+output=$(ropt read --key "build.output-dir")
+
+ropt end
+```
+
+## Command Set
+
+### Session Management
+
+```bash
+ropt begin
+# Initialize a new session state machine
+# Generates a unique session identifier (derived from PID)
+# Creates a temporary state file in $XDG_RUNTIME_DIR/ropt/ or ~/.ropt/tmp/
+# Outputs the session identifier to stdout
+# Usage: export ROPT_SESSION=$(ropt begin)
+# Error if a session already exists for this process
+
+ropt end
+# Signal that the session's temporary file can be cleaned up
+# Reads session from $ROPT_SESSION env var or --session arg
+# Deletes the session state file from disk
+# Error if session not found
+```
+
+### Session Resolution
+
+All commands (except `begin`) resolve their session using this priority:
+1. `--session` argument (if provided): `ropt push ... --session=$SESSION_ID`
+2. `ROPT_SESSION` environment variable (if set): inherited from parent process
+3. Error: no session found (user must call `ropt begin` first)
+
+Example with nested scripts:
+```bash
+# Parent script
+export ROPT_SESSION=$(ropt begin)
+ropt push choice --message "Parent choice" --options "A" "B"
+./child-script.sh  # ROPT_SESSION inherited automatically
+ropt end
+
+# Child script
+ropt push choice --message "Child choice" --options "X" "Y"
+# Uses ROPT_SESSION from parent automatically
+```
+
+Override session if needed:
+```bash
+export ROPT_SESSION=$(ropt begin)
+ropt push choice --message "Session 1" --options "A" "B"
+
+OTHER_SESSION=$(ropt begin)
+ropt push choice --message "Session 2" --options "X" "Y" --session=$OTHER_SESSION
+
+# Two independent sessions running in parallel
+```
+
+### Defining Structure
+
+```bash
+ropt push <type> [--name <name>] [--description <desc>] [options...]
+# Push a new scope onto the definition stack
+# Session resolution: uses ROPT_SESSION or --session arg
+# Types: command, argument, choice, flag, input, group
+# Type-specific options documented below
+# Mutates session state file
+# Error if no session found (must call ropt begin first)
+
+ropt append <type> [--name <name>] [--description <desc>] [options...]
+# Shortcut for: push <type> ... pop
+# Adds a node at current depth without increasing nesting
+# Equivalent to: ropt push <type> [args]; ropt pop
+# Session resolution: same as push
+
+ropt pop
+# Pop from the definition stack (exit current scope)
+# Session resolution: uses ROPT_SESSION or --session arg
+# Error if already at depth 0
+# Returns to parent scope
+```
+
+### Execution & Results
+
+```bash
+ropt execute [--format json|sh|raw]
+# Read the session configuration file and present interactive prompts to user
+# Collect responses and output results
+# Session resolution: uses ROPT_SESSION or --session arg
+# Output format:
+#   - json: structured results as JSON
+#   - sh: shell-sourceable format (KEY=VALUE, KEY_ARRAY=(val1 val2))
+#   - raw: plain text output
+# Timeout on prompts: 60s per prompt (configurable via env var ROPT_TIMEOUT)
+# Error if no session found or config is malformed
+
+ropt show [--format json|tree]
+# Display the current definition structure (before execution)
+# Session resolution: uses ROPT_SESSION or --session arg
+# Useful for debugging the state machine
+# Error if no session found
+```
+
+## Type Definitions
+
+### select
+```bash
+ropt push select --message "Choose a target" [--render=picklist|input] [--multiple]
+  ropt append option --value "debug" --label "Debug build"
+  ropt append option --value "release" --label "Release build"
+ropt pop
+
+# Interactive: presents options for user selection
+# Stack-based structure: select contains option elements (like HTML <select><option>)
+# --render: auto (default), picklist (keyboard navigation), input (type to filter)
+# --multiple: allow multiple selections (checkbox-like behavior)
+# Result: selected value(s)
+
+# Rendering behavior:
+# - auto: < 5 options → picklist; >= 5 options → input with filtering
+# - picklist: keyboard-navigable menu (↑↓ arrows, Enter to select, works on TTY only)
+# - input: type to search/filter options, autocomplete (works everywhere)
+```
+
+### option
+```bash
+ropt append option --value "debug" --label "Debug build" [--default] [--disabled]
+# Child of select; defines available choices
+# --value: the value returned when selected
+# --label: display text (if not provided, value is used)
+# --default: mark as pre-selected
+# --disabled: option appears but cannot be selected
+
+# Examples:
+ropt append option --value "1" --label "Option 1"
+ropt append option --value "2" --label "Option 2" --default
+ropt append option --value "3" --label "Option 3 (unavailable)" --disabled
+```
+
+### group
+```bash
+ropt push group --label "Primary colors" [--description "..."]
+  ropt append option --value "red"
+  ropt append option --value "blue"
+ropt pop
+
+# Child of select; groups related options (like HTML <optgroup>)
+# Pure structure; no special execution behavior
+# Used to organize options visually
+```
+
+### flag
+```bash
+ropt append flag --name "verbose" --short v --description "Verbose output"
+# Interactive: yes/no prompt
+# Result: boolean (true/false)
+```
+
+### input
+```bash
+ropt append input --name "username" --type string --description "Your username"
+# Interactive: read line from user
+# --type: string (default), number, email, path, regex:<pattern>
+# --validate-regex: custom regex validation
+# --validate-min/max: length or numeric bounds
+# --default: default value if user enters nothing
+# Result: user input (validated)
+```
+
+### argument
+```bash
+ropt push argument --name "target" --description "Build target"
+  ropt push select
+    ropt append option --value "debug"
+    ropt append option --value "release"
+  ropt pop
+ropt pop
+# Container for related options (e.g., a target argument with choices)
+# Result: user's selection from nested options
+```
+
+### command
+```bash
+ropt push command --name "build" --description "Build the project"
+  # nested arguments, flags, inputs
+ropt pop
+# Top-level container for a subcommand
+# Typically pushed once at depth 0
+```
+
+## State Machine Semantics
+
+### Session Lifecycle
+
+```
+[ropt begin]
+    ↓ (session state file created)
+[ropt push/append/pop ... (mutations)]
+    ↓ (session state file updated)
+[ropt execute]
+    ↓ (interactive prompts, results stored in session state file)
+[ropt read ...]
+    ↓ (retrieve cached results)
+[ropt end]
+    ↓ (session state file deleted)
+```
+
+### Stack-Based Nesting
+
+Each `ropt push` increases nesting depth; `ropt pop` decreases it.
+`ropt append` is syntactic sugar: `push ... pop` at same depth.
+
+Example:
+```bash
+ropt begin
+  depth=0
+ropt push command --name "build"
+  depth=1
+ropt push argument --name "target"
+  depth=2
+ropt append option --value "debug"
+  # equivalent to: push option ... pop (stays at depth=2)
+ropt pop
+  depth=1
+ropt append flag --name "verbose"
+  # equivalent to: push flag ... pop (stays at depth=1)
+ropt pop
+  depth=0
+```
+
+### Conditional Structure with Bash Control Flow
+
+Because each `ropt` command mutates the session state file, you can use **native bash control flow** to conditionally define options. No special conditional syntax needed—just shell logic!
+
+```bash
+export ROPT_SESSION=$(ropt begin)
+
+ropt push select --message "Build target"
+  ropt append option --value "debug" --label "Debug"
+  
+  # Conditionally add test option
+  if [[ "$ENV" == "dev" ]]; then
+    ropt append option --value "test" --label "Run tests"
+  fi
+  
+  ropt append option --value "release" --label "Release"
+ropt pop
+
+ropt execute
+target=$(ropt read --key "select.0")
+ropt end
+```
+
+**Dynamic options from loops:**
+```bash
+ropt push select --message "Choose region"
+  for region in "${REGIONS[@]}"; do
+    ropt append option --value "$region"
+  done
+ropt pop
+```
+
+**Case-based structure:**
+```bash
+ropt push select --message "Platform-specific actions"
+  case "$PLATFORM" in
+    linux)
+      ropt append option --value "apt-update"
+      ropt append option --value "systemctl-restart"
+      ;;
+    macos)
+      ropt append option --value "brew-update"
+      ropt append option --value "launchctl-restart"
+      ;;
+  esac
+ropt pop
+```
+
+**Complex conditional sections:**
+```bash
+ropt push select --message "Options"
+  ropt append option --value "basic"
+  
+  if [[ "$ADVANCED_MODE" == "true" ]]; then
+    ropt push group --label "Advanced"
+      ropt append option --value "adv-1"
+      ropt append option --value "adv-2"
+      ropt append option --value "adv-3"
+    ropt pop
+  fi
+  
+  if [[ "$DEBUG" == "true" ]]; then
+    ropt push group --label "Debug"
+      ropt append option --value "debug-verbose"
+      ropt append option --value "debug-trace"
+    ropt pop
+  fi
+ropt pop
+```
+
+**Key principle:** The shell's native control flow (`if/then/else`, `for`, `case`, `while`) IS the conditional logic. ropt never needs to evaluate expressions—it just builds whatever the shell instructs.
+
+### Result Paths
+
+Results are keyed hierarchically by their position in the structure.
+
+```bash
+ropt push command --name "build"
+  ropt push argument --name "target"
+    ropt append choice --value "debug"
+    ropt append choice --value "release"
+  ropt pop
+ropt pop
+
+# After execute, results are stored as:
+# build.target = "debug" or "release"
+# Access: ropt read --key "build.target"
+```
+
+## Security & Hardening
+
+### Temp File Permissions
+- Location: `$XDG_RUNTIME_DIR/ropt/` (Linux) or `~/.ropt/tmp/` (fallback)
+- Permissions: 0600 (user-only read/write)
+- Validated on every operation: verify ownership before mutation/read
+
+### Input Validation
+- All CLI args and interactive inputs validated before storage
+- Shell metacharacters escaped or rejected (unless explicitly allowed)
+- Type validation: choice, flag, input types enforce constraints
+- Custom regex validation via `--validate-regex`
+
+### Interactive Prompt Security
+- Timeout: 60s per prompt (env var: `ROPT_TIMEOUT`)
+- Sensitive inputs: disabled readline history if `--sensitive` flag used
+- Memory clearing: user input cleared after processing
+
+### DoS Prevention Limits
+- Max nesting depth: 10 levels
+- Max options per select: 1000
+- Max groups per select: 100
+- Max input length: 10KB
+- Max session file size: 1MB
+- Enforce limits on push/append operations
+
+### Concurrency & Integrity
+- File locking: exclusive lock during mutations, shared lock during reads
+- Checksum validation: verify session file not tampered with
+- Single writer per session: concurrent readers allowed
+- Auto-cleanup: sessions expire after 24h if not explicitly ended
+
+## Usage Patterns
+
+### Pattern 1: Simple Interactive Menu (select with picklist rendering)
+```bash
+#!/bin/bash
+export ROPT_SESSION=$(ropt begin)
+
+ropt push select --message "Select an action" --render=picklist
+  ropt append option --value "deploy" --label "Deploy"
+  ropt append option --value "rollback" --label "Rollback"
+  ropt append option --value "status" --label "Check Status"
+ropt pop
+
+# Execute prompts and capture output as shell variables
+eval "$(ropt execute --format=sh)"
+
+ropt end
+
+case "$select_0" in
+  deploy) ./deploy.sh ;;
+  rollback) ./rollback.sh ;;
+  status) ./status.sh ;;
+esac
+```
+
+### Pattern 2: Conditional Options (using bash control flow)
+```bash
+#!/bin/bash
+export ROPT_SESSION=$(ropt begin)
+ENV="${1:-dev}"
+
+ropt push select --message "Build target"
+  ropt append option --value "debug" --label "Debug"
+  
+  # Only show test option in dev environment
+  if [[ "$ENV" == "dev" ]]; then
+    ropt append option --value "test" --label "Run tests"
+  fi
+  
+  ropt append option --value "release" --label "Release"
+ropt pop
+
+# Execute and output results as JSON
+result=$(ropt execute --format=json)
+target=$(echo "$result" | jq -r '.select.value')
+
+ropt end
+
+echo "Building: $target"
+```
+
+### Pattern 3: Multi-Step Configuration (with grouped options)
+```bash
+#!/bin/bash
+export ROPT_SESSION=$(ropt begin)
+
+ropt push input --name "db-host" --type string --description "Database host"
+ropt pop
+
+ropt push select --message "Database type?" --render=input
+  ropt push group --label "Relational"
+    ropt append option --value "postgres" --label "PostgreSQL"
+    ropt append option --value "mysql" --label "MySQL"
+  ropt pop
+  ropt push group --label "NoSQL"
+    ropt append option --value "mongodb" --label "MongoDB"
+    ropt append option --value "dynamodb" --label "AWS DynamoDB"
+  ropt pop
+ropt pop
+
+ropt append flag --name "ssl" --description "Enable SSL?"
+
+ropt push input --name "port" --type number --default "5432"
+ropt pop
+
+# Execute and source the output as shell variables
+eval "$(ropt execute --format=sh)"
+
+ropt end
+
+# Use the variables directly
+echo "Connecting to $input_db_host with $select_database_type (SSL: $flag_ssl, Port: $input_port)"
+```
+
+### Pattern 4: Dynamic Options from Arrays (loops)
+```bash
+#!/bin/bash
+export ROPT_SESSION=$(ropt begin)
+
+REGIONS=("us-east-1" "us-west-2" "eu-west-1" "ap-southeast-1")
+
+ropt push select --message "Choose deployment region" --render=picklist
+  for region in "${REGIONS[@]}"; do
+    ropt append option --value "$region"
+  done
+ropt pop
+
+# Execute and output as JSON
+result=$(ropt execute --format=json)
+region=$(echo "$result" | jq -r '.select.value')
+
+ropt end
+
+echo "Deploying to: $region"
+```
+
+### Pattern 5: Platform-Specific Options (case statement)
+```bash
+#!/bin/bash
+export ROPT_SESSION=$(ropt begin)
+PLATFORM="${OSTYPE%%[0-9]*}"
+
+ropt push select --message "Platform actions"
+  case "$PLATFORM" in
+    linux)
+      ropt append option --value "apt-update" --label "apt update"
+      ropt append option --value "systemctl-restart" --label "systemctl restart"
+      ;;
+    darwin)
+      ropt append option --value "brew-update" --label "brew update"
+      ropt append option --value "launchctl-restart" --label "launchctl restart"
+      ;;
+  esac
+ropt pop
+
+# Execute and source output as shell variables
+eval "$(ropt execute --format=sh)"
+
+ropt end
+
+# Execute platform-specific action
+echo "Running: $select_0"
+```
+
+## Comparison to Alternatives
+
+| Tool | Use Case | vs ropt |
+|------|----------|--------|
+| getopts | Shell script arg parsing | ropt: higher-level, interactive, stateful |
+| optarg | Python arg parsing | ropt: works cross-language, simpler DSL |
+| fzf | Menu selection | ropt: structured hierarchy, type validation |
+| dialog/whiptail | TUI forms | ropt: simpler API, no external deps |
+
+## Future Enhancements (Out of Scope)
+
+- Conditional display: Show/hide options based on prior answers (use bash conditionals instead)
+- Validation callbacks: custom validation functions
+- Async execution: parallel prompt evaluation
+- Persistent storage: option to save config after execution
+- Configuration files: define structures in YAML/JSON, load with ropt
+- Multi-select result formatting: specialized handling for arrays of selections

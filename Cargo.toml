@@ -1,0 +1,44 @@
+[package]
+name = "ropt"
+version = "0.1.0"
+edition = "2024"
+description = "Interactive CLI option configuration tool – define prompts declaratively and drive them from shell scripts"
+authors = []
+license = "MIT"
+repository = "https://github.com/gphillips/ropt"
+homepage = "https://github.com/gphillips/ropt"
+documentation = "https://docs.rs/ropt"
+readme = "README.md"
+keywords = ["cli", "interactive", "prompt", "tui", "shell"]
+categories = ["command-line-utilities", "command-line-interface"]
+exclude = ["plan.txt"]
+
+[[bin]]
+name = "ropt"
+path = "src/main.rs"
+
+[dependencies]
+# CLI argument parsing
+clap = { version = "4", features = ["derive", "env"] }
+
+# Serialization for session state files (binary) and JSON output
+serde = { version = "1", features = ["derive"] }
+rmp-serde = "1"
+serde_json = "1"
+
+# Terminal rendering and colors
+crossterm = "0.27"
+
+# File locking for session integrity
+fs2 = "0.4"
+
+# UUID / random for session IDs
+uuid = { version = "1", features = ["v4"] }
+
+# Error handling
+thiserror = "1"
+anyhow = "1"
+
+# Home directory resolution
+dirs = "5"
+regex = "1.12.3"
